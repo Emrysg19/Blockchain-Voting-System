@@ -1,7 +1,3 @@
-// Biometric service integration for external hardware over HTTP or WebSocket
-// Configuration via environment variables:
-// - VITE_BIOMETRIC_HTTP_URL (e.g., https://device.local/api/verify)
-// - VITE_BIOMETRIC_WS_URL   (e.g., wss://device.local/biometric)
 
 const HTTP_URL = import.meta.env.VITE_BIOMETRIC_HTTP_URL || null;
 const WS_URL = import.meta.env.VITE_BIOMETRIC_WS_URL || null;

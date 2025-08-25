@@ -1,7 +1,7 @@
 const { ethers } = require("hardhat");
 
 async function main() {
-  const contractAddress = "0xDbbAdfBb9EcE04Dd729dEe17dbb861c54a5Cbcca";
+  const contractAddress = "0x993e9254713F7d6c1F51eA71BAB8D6742b28284f";
   
   console.log("🔧 Fixing election creation...");
   console.log(`📋 Contract Address: ${contractAddress}`);
