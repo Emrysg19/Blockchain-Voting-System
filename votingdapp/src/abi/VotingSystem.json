@@ -1,7 +1,5 @@
 {
-  "_format": "hh-sol-artifact-1",
-  "contractName": "VotingSystem",
-  "sourceName": "contracts/VotingSystem.sol",
+  
   "abi": [
     {
       "inputs": [],
@@ -582,11 +580,11 @@
           "name": "id",
           "type": "uint256"
         },
-            {
-              "internalType": "string",
-              "name": "name",
-              "type": "string"
-            },
+        {
+          "internalType": "string",
+          "name": "name",
+          "type": "string"
+        },
         {
           "internalType": "string",
           "name": "winner",
@@ -705,12 +703,12 @@
     },
     {
       "inputs": [
-            {
-              "internalType": "uint256",
+        {
+          "internalType": "uint256",
           "name": "_electionId",
-              "type": "uint256"
-            }
-          ],
+          "type": "uint256"
+        }
+      ],
       "name": "hasElectionEnded",
       "outputs": [
         {

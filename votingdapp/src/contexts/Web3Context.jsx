@@ -135,8 +135,9 @@ export const Web3Provider = ({ children }) => {
       setElectionCount(Number(electionCountData));
 
       // Update RPC status
-      const status = await rpcManager.getEndpointStatus();
-      setRpcStatus(status);
+      const checkRpc = async () => {
+    console.log("🔍 Skipping endpoint status check (custom RPC only mode).");
+  };
 
     } catch (err) {
       console.error("Web3 initialization error:", err);
@@ -197,9 +198,9 @@ export const Web3Provider = ({ children }) => {
   // Check RPC health
   const checkRPCHealth = async () => {
     try {
-      const status = await rpcManager.getEndpointStatus();
-      setRpcStatus(status);
-      return status;
+       const checkRpc = async () => {
+    console.log("🔍 Skipping endpoint status check (custom RPC only mode).");
+  };
     } catch (err) {
       console.error("Failed to check RPC health:", err);
       return {};

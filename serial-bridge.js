@@ -1,107 +1,65 @@
-// Node.js Serial Bridge for ESP32 Biometric Oracle
-// Run with: node serial-bridge.js
-// Required packages: express serialport @serialport/parser-readline ws cors
+// serial-bridge.js (CommonJS version)
+const { SerialPort } = require("serialport");
+const { WebSocketServer } = require("ws");
 
-const express = require('express');
-const cors = require('cors');
-const { SerialPort } = require('serialport'); // v13
-const { ReadlineParser } = require('@serialport/parser-readline');
-const WebSocket = require('ws');
+const SERIAL_PORT = "COM8";   // Replace with your ESP32 COM port
+const SERIAL_BAUD = 115200;
 
-const SERIAL_PORT = 'COM1'; // Your device port
-const BAUD_RATE = 115200;
+// ----- Setup Serial Port -----
+const port = new SerialPort({ path: SERIAL_PORT, baudRate: SERIAL_BAUD });
+port.on("open", () => console.log(`Serial port ${SERIAL_PORT} opened at ${SERIAL_BAUD}`));
+port.on("error", (err) => console.error("Serial port error:", err));
 
-const port = new SerialPort({ path: SERIAL_PORT, baudRate: BAUD_RATE });
-const parser = port.pipe(new ReadlineParser({ delimiter: '\n' }));
+// ----- WebSocket Server -----
+const wss = new WebSocketServer({ port: 5001 });
+console.log("WebSocket bridge listening on ws://localhost:5001");
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+// Store connected clients
+const clients = new Set();
 
-// Generic helper to send action to device and wait for JSON reply
-function requestBiometric(action, voterId, timeoutMs = 5000) {
-  return new Promise((resolve, reject) => {
-    let finished = false;
+wss.on("connection", (ws) => {
+  console.log("Frontend connected via WebSocket");
+  clients.add(ws);
 
-    const onData = (data) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      try {
-        const obj = JSON.parse(data);
-        resolve(obj);
-      } catch (e) {
-        reject(new Error('Invalid JSON from device'));
+  ws.on("message", (msg) => {
+    try {
+      const data = JSON.parse(msg.toString());
+      console.log("Received from frontend:", data);
+
+      if (data.type === "enroll" || data.type === "verify") {
+        // Forward command to ESP32
+        const command = JSON.stringify({ action: data.type.toUpperCase() + "_BIOMETRIC", voterId: data.voterId }) + "\n";
+        port.write(command, (err) => {
+          if (err) console.error("Error writing to serial port:", err);
+          else console.log(`Sent to ESP32: ${command.trim()}`);
+        });
+      } else {
+        console.warn("Unknown command type:", data.type);
       }
-    };
+    } catch (err) {
+      console.error("Failed to parse message from frontend:", err);
+    }
+  });
 
-    const timer = setTimeout(() => {
-      if (finished) return;
-      finished = true;
-      parser.removeListener('data', onData);
-      reject(new Error('Timeout waiting for device'));
-    }, timeoutMs);
+  ws.on("close", () => {
+    clients.delete(ws);
+    console.log("Frontend disconnected");
+  });
+});
 
-    parser.once('data', onData);
+// ----- Listen for ESP32 Responses -----
+port.on("data", (data) => {
+  const lines = data.toString().split("\n").filter(Boolean);
+  lines.forEach((line) => {
+    console.log("Received from ESP32:", line.trim());
 
-    const payload = voterId ? `${action.toUpperCase()} ${voterId}\n` : `${action.toUpperCase()}\n`;
-    port.write(payload, (err) => {
-      if (err && !finished) {
-        finished = true;
-        clearTimeout(timer);
-        parser.removeListener('data', onData);
-        reject(err);
+    // Broadcast to all connected frontend clients
+    clients.forEach((ws) => {
+      try {
+        ws.send(line.trim());
+      } catch (err) {
+        console.error("Failed to send to frontend:", err);
       }
     });
   });
-}
-
-// HTTP endpoint
-app.post('/biometric', async (req, res) => {
-  const { action, voterId } = req.body;
-  if (!['ENROLL_BIOMETRIC', 'VERIFY_BIOMETRIC'].includes(action?.toUpperCase())) {
-    return res.status(400).json({ success: false, error: 'Invalid action' });
-  }
-  if (!voterId || voterId.trim() === '') {
-    return res.status(400).json({ success: false, error: 'voterId is required' });
-  }
-  try {
-    const result = await requestBiometric(action, voterId, 8000);
-    res.json({ success: true, action, payload: result });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
 });
-
-// Start server and attach WebSocket
-const server = app.listen(5000, () => console.log('Serial bridge listening on port 5000'));
-const wss = new WebSocket.Server({ server });
-
-wss.on('connection', (ws) => {
-  ws.on('message', async (message) => {
-    let action, voterId;
-    try {
-      const parsed = JSON.parse(message);
-      action = parsed.action;
-      voterId = parsed.voterId;
-    } catch (_) {
-      action = String(message).trim();
-    }
-
-    if (!['ENROLL_BIOMETRIC', 'VERIFY_BIOMETRIC'].includes(action?.toUpperCase())) {
-      return ws.send(JSON.stringify({ type: 'error', error: 'Unknown action' }));
-    }
-    if (!voterId || voterId.trim() === '') {
-      return ws.send(JSON.stringify({ type: 'error', error: 'voterId is required' }));
-    }
-
-    try {
-      const result = await requestBiometric(action, voterId, 8000);
-      ws.send(JSON.stringify({ type: 'biometric_result', action, payload: result }));
-    } catch (e) {
-      ws.send(JSON.stringify({ type: 'error', error: e.message }));
-    }
-  });
-});
-
-port.on('error', (err) => console.error('Serial port error:', err.message));
