@@ -27,8 +27,18 @@ wss.on("connection", (ws) => {
       console.log("Received from frontend:", data);
 
       if (data.type === "enroll" || data.type === "verify") {
-        // Forward command to ESP32
-        const command = JSON.stringify({ action: data.type.toUpperCase() + "_BIOMETRIC", voterId: data.voterId }) + "\n";
+        // Forward enroll/verify command to ESP32
+        const command = JSON.stringify({
+          action: data.type.toUpperCase() + "_BIOMETRIC",
+          voterId: data.voterId
+        }) + "\n";
+        port.write(command, (err) => {
+          if (err) console.error("Error writing to serial port:", err);
+          else console.log(`Sent to ESP32: ${command.trim()}`);
+        });
+      } else if (data.type === "clear") {
+        // Forward clear DB command to ESP32
+        const command = JSON.stringify({ action: "CLEAR_BIOMETRIC_DB" }) + "\n";
         port.write(command, (err) => {
           if (err) console.error("Error writing to serial port:", err);
           else console.log(`Sent to ESP32: ${command.trim()}`);
@@ -48,18 +58,29 @@ wss.on("connection", (ws) => {
 });
 
 // ----- Listen for ESP32 Responses -----
-port.on("data", (data) => {
-  const lines = data.toString().split("\n").filter(Boolean);
-  lines.forEach((line) => {
-    console.log("Received from ESP32:", line.trim());
+let serialBuffer = "";
 
-    // Broadcast to all connected frontend clients
-    clients.forEach((ws) => {
-      try {
-        ws.send(line.trim());
-      } catch (err) {
-        console.error("Failed to send to frontend:", err);
-      }
-    });
+port.on("data", (data) => {
+  serialBuffer += data.toString();
+
+  // Split on newline
+  let lines = serialBuffer.split("\n");
+  serialBuffer = lines.pop(); // keep last incomplete chunk
+
+  lines.forEach((line) => {
+    line = line.trim();
+    if (!line) return;
+
+    console.log("Received from ESP32:", line);
+
+    // Validate JSON before sending
+    try {
+      const json = JSON.parse(line);
+      clients.forEach((ws) => {
+        ws.send(JSON.stringify(json));
+      });
+    } catch (err) {
+      console.error("Invalid JSON from ESP32:", line);
+    }
   });
 });
