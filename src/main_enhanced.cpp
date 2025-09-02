@@ -1,364 +1,234 @@
 #include <Arduino.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
 #include <HardwareSerial.h>
-#include <LiquidCrystal_I2C.h>
+#include <ArduinoJson.h>
 #include <Adafruit_Fingerprint.h>
-#include "BLOCKCHAIN_CONFIG.h"
+#include <LiquidCrystal_I2C.h>
 
-// Pin definitions
-#define FINGERPRINT_RX 16
-#define FINGERPRINT_TX 17
-#define BUZZER_PIN 18
+// LCD setup
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// LCD dimensions
-static const uint8_t LCD_COLS = 20;
-static const uint8_t LCD_ROWS = 4;
+// Fingerprint sensor setup (AS608 on GPIO16=RX2, GPIO17=TX2)
+HardwareSerial fpSerial(2);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&fpSerial);
 
-// System states
-enum SystemState {
-  STARTING,
-  VOTING_MODE,
-  PROCESSING
-};
+// Buffer for incoming JSON from Node server
+String inputBuffer = "";
 
-SystemState currentState = STARTING;
+// Forward declarations
+void processCommand(JsonDocument &doc);
+void enrollFingerprint(int id, const char *voterId);
+void verifyFingerprint(const char *voterId);
+void sendJson(JsonDocument &doc);
+void clearFingerprintDatabase();
 
-// Hardware objects
-HardwareSerial fingerprintSerial(2);
-Adafruit_Fingerprint finger(&fingerprintSerial);
-LiquidCrystal_I2C lcd(0x27, 20, 4);
-
-// Vote tracking
-unsigned long lastVoteTime = 0;
-int votesThisMinute = 0;
-unsigned long lastMinuteReset = 0;
-
-// Function prototypes
-void setupWiFi();
-void setupHardware();
-void displayMessage(const String& message, int row = 0);
-void clearDisplay();
-void beepSuccess();
-void beepError();
-void beepLong();
-void processFingerprintVoting();
-bool sendVoteToBlockchain(const String& voterId);
-void showVotingMode();
-void resetVoteCounter();
-bool isRateLimitExceeded();
-String createVotePayload(const String& voterId);
-void addAuthenticationHeaders(HTTPClient& http);
-bool isSuccessResponse(int httpCode, const String& response);
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Enhanced Blockchain Voting System Starting...");
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(0, 0);
+  lcd.print("AS608 Probe...");
   
-  setupHardware();
-  setupWiFi();
-  
-  // Initialize fingerprint sensor
+  // Start fingerprint sensor on 57600 baud
+  fpSerial.begin(57600, SERIAL_8N1, 16, 17);
   finger.begin(57600);
+
+  delay(1000);
+
   if (finger.verifyPassword()) {
-    Serial.println("Fingerprint sensor found!");
-    displayMessage("System Ready", 0);
-    displayMessage("Starting voting mode...", 1);
-    delay(2000);
-    currentState = VOTING_MODE;
-    showVotingMode();
+    lcd.clear();
+    lcd.print("✅ Sensor Ready");
+    Serial.println("✅ Found fingerprint sensor!");
   } else {
-    Serial.println("Fingerprint sensor not found!");
-    displayMessage("Sensor Error!", 0);
-    displayMessage("Check connections", 1);
-    while (1) {
-      delay(1000);
-    }
+    lcd.clear();
+    lcd.print("Sensor not found");
+    Serial.println("❌ Fingerprint sensor not found. Check wiring.");
+    while (1) delay(1);
   }
 }
 
 void loop() {
-  // Reset vote counter every minute
-  resetVoteCounter();
-  
-  switch (currentState) {
-    case VOTING_MODE:
-      processFingerprintVoting();
-      break;
-    case PROCESSING:
-      break;
-    default:
-      break;
+  // Handle serial input (JSON from Node server)
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      StaticJsonDocument<256> doc;
+      DeserializationError err = deserializeJson(doc, inputBuffer);
+      if (!err) {
+        processCommand(doc);
+      }
+      inputBuffer = "";
+    } else {
+      inputBuffer += c;
+    }
   }
-  
-  delay(100);
 }
 
-void setupHardware() {
-  pinMode(BUZZER_PIN, OUTPUT);
-  
-  lcd.init();
-  lcd.backlight();
+void processCommand(JsonDocument &doc) {
+  if (!doc.containsKey("action")) return;
+  String action = doc["action"].as<String>();
+
+  if (action == "ENROLL_BIOMETRIC") {
+    const char *voterId = doc["voterId"];
+    int fingerId = random(1, 200); // Assign ID dynamically (or from DB)
+    enrollFingerprint(fingerId, voterId);
+  }
+  else if (action == "VERIFY_BIOMETRIC") {
+  const char *voterId = doc["voterId"];
+  verifyFingerprint(voterId);
+}
+else if (action == "CLEAR_BIOMETRIC_DB") {
+    clearFingerprintDatabase();
+}
+
+}
+
+void enrollFingerprint(int id, const char *voterId) {
   lcd.clear();
-  
-  fingerprintSerial.begin(57600, SERIAL_8N1, FINGERPRINT_RX, FINGERPRINT_TX);
-  
-  Serial.println("Hardware initialized");
-}
+  lcd.print("Place finger...");
+  Serial.println("Waiting for finger...");
 
-void setupWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to WiFi SSID: ");
-  Serial.print(WIFI_SSID);
-  
-  unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < WIFI_TIMEOUT_MS) {
-    delay(500);
-    Serial.print(".");
-  }
-  
-  Serial.println();
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected!");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("WiFi connect timed out. Check SSID/password and 2.4GHz availability.");
-  }
-}
-
-void displayMessage(const String& message, int row) {
-  if (row < 0) row = 0;
-  if (row >= LCD_ROWS) row = LCD_ROWS - 1;
-  // Clear the entire row to avoid leftover characters
-  lcd.setCursor(0, row);
-  for (uint8_t i = 0; i < LCD_COLS; i++) {
-    lcd.print(' ');
-  }
-  // Write trimmed text (truncate if longer than display width)
-  String text = message;
-  if (text.length() > LCD_COLS) {
-    text = text.substring(0, LCD_COLS);
-  }
-  lcd.setCursor(0, row);
-  lcd.print(text);
-}
-
-void clearDisplay() {
-  lcd.clear();
-}
-
-void beepSuccess() {
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(100);
-  digitalWrite(BUZZER_PIN, LOW);
-}
-
-void beepError() {
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(200);
-  digitalWrite(BUZZER_PIN, LOW);
-}
-
-void beepLong() {
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(1000);
-  digitalWrite(BUZZER_PIN, LOW);
-}
-
-void showVotingMode() {
-  clearDisplay();
-  displayMessage("=== VOTING MODE ===", 0);
-  displayMessage("Place finger to vote", 1);
-  displayMessage("System is ready", 2);
-  displayMessage("Waiting for voter...", 3);
-  beepSuccess();
-}
-
-void resetVoteCounter() {
-  if (millis() - lastMinuteReset >= 60000) {
-    votesThisMinute = 0;
-    lastMinuteReset = millis();
-  }
-}
-
-bool isRateLimitExceeded() {
-  return votesThisMinute >= MAX_VOTES_PER_MINUTE;
-}
-
-void processFingerprintVoting() {
-  // Check rate limiting
-  if (isRateLimitExceeded()) {
-    displayMessage("Rate limit exceeded", 2);
-    displayMessage("Please wait...", 3);
-    delay(2000);
-    showVotingMode();
-    return;
-  }
-  
-  // Check cooldown
-  if (millis() - lastVoteTime < VOTE_COOLDOWN_MS) {
-    return;
-  }
-  
-  uint8_t p = finger.getImage();
-  if (p != FINGERPRINT_OK) {
-    if (p == FINGERPRINT_NOFINGER) {
+  int p = -1;
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_NOFINGER) continue;
+    if (p != FINGERPRINT_OK) {
+      Serial.println("Error capturing image");
       return;
     }
-    Serial.println("Error getting image");
+  }
+
+  // Convert image
+  p = finger.image2Tz(1);
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Error image2Tz");
     return;
   }
-  
+
+  lcd.clear();
+  lcd.print("Remove finger...");
+  delay(2000);
+
+  // Wait for finger to be removed
+  while (finger.getImage() != FINGERPRINT_NOFINGER);
+
+  lcd.clear();
+  lcd.print("Same finger...");
+  Serial.println("Place same finger again");
+
+  p = -1;
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_NOFINGER) continue;
+    if (p != FINGERPRINT_OK) {
+      Serial.println("Error capturing 2nd image");
+      return;
+    }
+  }
+
+  // Convert 2nd image
+  p = finger.image2Tz(2);
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Error image2Tz 2");
+    return;
+  }
+
+  // Create model
+  p = finger.createModel();
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Error createModel");
+    return;
+  }
+
+  // Store model
+  p = finger.storeModel(id);
+  StaticJsonDocument<256> response;
+  if (p == FINGERPRINT_OK) {
+    lcd.clear();
+    lcd.print("Enrolled OK!");
+    response["type"] = "success";
+    response["message"] = "Fingerprint enrolled";
+    response["voterId"] = voterId;
+    response["id"] = id;
+    sendJson(response);
+    
+  } else {
+    lcd.clear();
+    lcd.print("Enroll failed");
+    response["type"] = "error";
+    response["error"] = "Enrollment failed";
+    response["voterId"] = voterId;
+    sendJson(response);
+    
+  }
+}
+void verifyFingerprint(const char *voterId) {
+  lcd.clear();
+  lcd.print("Place finger...");
+  Serial.println("Waiting for finger...");
+
+  int p = -1;
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_NOFINGER) continue;
+    if (p != FINGERPRINT_OK) {
+      Serial.println("Error capturing image");
+      return;
+    }
+  }
+
+  // Convert image
   p = finger.image2Tz();
   if (p != FINGERPRINT_OK) {
-    Serial.println("Error converting image");
+    Serial.println("Error image2Tz");
     return;
   }
-  
+
+  // Search database
   p = finger.fingerSearch();
-  if (p != FINGERPRINT_OK) {
-    if (p == FINGERPRINT_NOTFOUND) {
-      displayMessage("Access Denied!", 2);
-      displayMessage("Print not found", 3);
-      beepLong();
-      delay(2000);
-      showVotingMode();
+  StaticJsonDocument<256> response;
+
+  if (p == FINGERPRINT_OK) {
+    lcd.clear();
+    lcd.print("Verified!");
+    response["type"] = "success";
+    response["message"] = "Fingerprint verified";
+    response["voterId"] = voterId;
+    response["id"] = finger.fingerID;
+    sendJson(response);
+  } else {
+    lcd.clear();
+    lcd.print("No match");
+    response["type"] = "error";
+    response["error"] = "No match found";
+    response["voterId"] = voterId;
+    sendJson(response);
+  }
+}
+void clearFingerprintDatabase() {
+    lcd.clear();
+    lcd.print("Clearing DB...");
+    
+    int p = finger.emptyDatabase();
+    StaticJsonDocument<256> response;
+
+    if (p == FINGERPRINT_OK) {
+        response["type"] = "success";
+        response["message"] = "All fingerprints cleared";
     } else {
-      Serial.println("Error searching fingerprint");
+        response["type"] = "error";
+        response["error"] = "Failed to clear DB";
     }
-    return;
-  }
-  
-  String voterId = "V" + String(finger.fingerID);
-  displayMessage("Voter ID: " + voterId, 2);
-  displayMessage("Processing vote...", 3);
-  
-  if (sendVoteToBlockchain(voterId)) {
-    displayMessage("Vote Cast Successfully!", 2);
-    displayMessage("Thank you for voting!", 3);
-    beepSuccess();
-    votesThisMinute++;
-    lastVoteTime = millis();
-  } else {
-    displayMessage("Vote Failed!", 2);
-    displayMessage("Please try again", 3);
-    beepError();
-  }
-  
-  delay(3000);
-  showVotingMode();
+
+    sendJson(response);
+
+    lcd.clear();
+    lcd.print("Ready for action");
 }
 
-String createVotePayload(const String& voterId) {
-  StaticJsonDocument<512> doc;
-  
-  // Required fields
-  #if INCLUDE_VOTER_ID
-    doc[FIELD_VOTER_ID] = voterId;
-  #endif
-  
-  #if INCLUDE_TIMESTAMP
-    doc[FIELD_TIMESTAMP] = millis();
-  #endif
-  
-  #if INCLUDE_DEVICE_ID
-    doc[FIELD_DEVICE_ID] = DEVICE_ID;
-  #endif
-  
-  // Optional fields
-  #if defined(INCLUDE_ELECTION_ID) && INCLUDE_ELECTION_ID
-    doc[FIELD_ELECTION_ID] = DEFAULT_ELECTION_ID;
-  #endif
-  
-  #if defined(INCLUDE_CANDIDATE_ID) && INCLUDE_CANDIDATE_ID
-    doc[FIELD_CANDIDATE_ID] = DEFAULT_CANDIDATE_ID;
-  #endif
-  
-  #if defined(INCLUDE_LOCATION) && INCLUDE_LOCATION
-    doc[FIELD_LOCATION] = DEVICE_LOCATION;
-  #endif
-  
-  #if defined(INCLUDE_POLLING_STATION) && INCLUDE_POLLING_STATION
-    doc[FIELD_POLLING_STATION] = DEVICE_LOCATION;
-  #endif
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  
-  #if LOG_VOTE_DATA
-    Serial.println("Vote payload: " + jsonString);
-  #endif
-  
-  return jsonString;
-}
-
-void addAuthenticationHeaders(HTTPClient& http) {
-  #if defined(USE_API_KEY) && USE_API_KEY
-    http.addHeader(API_KEY_HEADER, API_KEY);
-  #endif
-  
-  #if defined(USE_BEARER_TOKEN) && USE_BEARER_TOKEN
-    http.addHeader(BEARER_HEADER, "Bearer " + String(BEARER_TOKEN));
-  #endif
-}
-
-bool isSuccessResponse(int httpCode, const String& response) {
-  // Check HTTP status code
-  if (httpCode == 200 || httpCode == 201 || httpCode == 202) {
-    return true;
-  }
-  
-  // Parse response body if enabled
-  #if defined(PARSE_RESPONSE_BODY) && PARSE_RESPONSE_BODY
-    if (response.indexOf(SUCCESS_RESPONSE_KEY) != -1) {
-      if (response.indexOf(SUCCESS_RESPONSE_VALUE) != -1) {
-        return true;
-      }
-    }
-  #endif
-  
-  return false;
-}
-
-bool sendVoteToBlockchain(const String& voterId) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected");
-    return false;
-  }
-  
-  HTTPClient http;
-  http.begin(BLOCKCHAIN_FULL_URL);
-  http.addHeader("Content-Type", CONTENT_TYPE);
-  
-  // Add authentication headers if configured
-  addAuthenticationHeaders(http);
-  
-  // Create vote payload
-  String jsonString = createVotePayload(voterId);
-  
-  Serial.println("Sending vote to: " + String(BLOCKCHAIN_FULL_URL));
-  
-  int httpResponseCode = http.POST(jsonString);
-  bool success = false;
-  String response = "";
-  
-  if (httpResponseCode > 0) {
-    response = http.getString();
-    
-    #if LOG_HTTP_RESPONSES
-      Serial.println("HTTP Response code: " + String(httpResponseCode));
-      Serial.println("Response: " + response);
-    #endif
-    
-    success = isSuccessResponse(httpResponseCode, response);
-  } else {
-    Serial.println("Error on HTTP request");
-  }
-  
-  http.end();
-  return success;
+void sendJson(JsonDocument &doc) {
+  String output;
+  serializeJson(doc, output);
+  Serial.println(output);
 }
